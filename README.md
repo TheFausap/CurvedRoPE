@@ -45,13 +45,16 @@ Hermitian, Lorentzian, symplectic, or induced by a curved manifold.
 ## Repo Layout
 
 - `docs/research-map.md`: mathematical framing and experiment plan.
+- `docs/nonabelian-path-rope.md`: adventurous path-ordered RoPE direction.
 - `src/curved_rope/`: dependency-light prototype code.
 - `experiments/metric_rope_demo.py`: runnable invariant checks.
+- `experiments/nonabelian_path_demo.py`: order-sensitive path RoPE demo.
 - `tests/`: regression tests for the algebraic invariants.
 
 ## Quick Start
 
 ```bash
 python3 experiments/metric_rope_demo.py
+python3 experiments/nonabelian_path_demo.py
 python3 -m unittest
 ```

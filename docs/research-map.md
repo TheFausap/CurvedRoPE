@@ -102,14 +102,36 @@ This is the most geometrically faithful approach, but also the most expensive.
 Good first cases are constant-curvature spaces: sphere, hyperbolic space, and
 products of both.
 
+### 6. Non-Abelian Path RoPE
+
+Instead of representing position with one scalar-indexed group element, let each
+token or local state produce a group element and accumulate an ordered prefix:
+
+```text
+P_t = S_(t-1) ... S_1 S_0
+```
+
+Then attention compares two tokens through the relative path:
+
+```text
+B(P_m q, P_n k) = B(q, P_m^-1 P_n k)
+```
+
+If the group is non-abelian, the ordered structure between the two tokens
+matters. This makes it a candidate for syntax, scope, discourse moves, and
+composition, rather than pure distance encoding. See
+`docs/nonabelian-path-rope.md`.
+
 ## Initial Experiment Plan
 
 1. Verify invariants for fixed metric-preserving transformations.
 2. Compare relative-position identity under Euclidean dot product versus the
    correct metric-aware pairing.
 3. Measure logit scale drift for Lorentz boosts.
-4. Implement PyTorch attention kernels once the algebraic prototypes are clear.
-5. Train tiny language models or synthetic retrieval tasks to see whether any
+4. Test whether non-abelian path products distinguish ordered synthetic
+   language-like structures.
+5. Implement PyTorch attention kernels once the algebraic prototypes are clear.
+6. Train tiny language models or synthetic retrieval tasks to see whether any
    geometry improves extrapolation.
 
 ## Practical Constraints
@@ -120,4 +142,3 @@ products of both.
   in unfamiliar ways.
 - A useful implementation probably needs careful normalization, per-head metric
   choices, and constraints on generator magnitude.
-
