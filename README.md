@@ -60,3 +60,15 @@ python3 experiments/metric_rope_demo.py
 python3 experiments/nonabelian_path_demo.py
 python3 -m unittest
 ```
+
+## PyTorch on Apple Silicon
+
+Create the local environment with Python 3.12:
+
+```bash
+/opt/homebrew/bin/python3.12 -m venv .venv
+.venv/bin/python -m pip install -r requirements-mps.txt
+.venv/bin/python experiments/check_torch_mps.py
+```
+
+The MPS check should report `mps available: True` and `device: mps:0`.
