@@ -51,6 +51,7 @@ Hermitian, Lorentzian, symplectic, or induced by a curved manifold.
 - `experiments/metric_rope_demo.py`: runnable invariant checks.
 - `experiments/nonabelian_path_demo.py`: order-sensitive path RoPE demo.
 - `experiments/compare_path_vs_rope.py`: optional NumPy comparison probe.
+- `experiments/train_tinystories.py`: CUDA/MPS/CPU TinyStories training script.
 - `tests/`: regression tests for the algebraic invariants.
 
 ## Quick Start
@@ -72,3 +73,7 @@ Create the local environment with Python 3.12:
 ```
 
 The MPS check should report `mps available: True` and `device: mps:0`.
+
+## TinyStories on CUDA
+
+For an unattended CUDA run, see [docs/dgx-tinystories-plan.md](docs/dgx-tinystories-plan.md).
