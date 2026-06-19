@@ -107,6 +107,37 @@ python experiments/train_tinystories.py \
 - `path_gate` values in the hybrid run
 - whether the hybrid catches up quickly or pays a large throughput penalty
 
+## Analyze Results
+
+After both runs have produced `metrics.jsonl`, generate a text verdict:
+
+```bash
+python experiments/analyze_metrics.py runs
+```
+
+Or specify runs explicitly:
+
+```bash
+python experiments/analyze_metrics.py \
+  runs/tinystories_rope \
+  runs/tinystories_path_hybrid
+```
+
+If `matplotlib` is installed, write a PNG chart:
+
+```bash
+python experiments/analyze_metrics.py runs --plot runs/tinystories_comparison.png
+```
+
+The verdict labels are:
+
+- `PROMOTE`: validation loss improves enough, throughput is acceptable, and the
+  path gate is active
+- `PROMISING`: validation loss is close or slightly better with acceptable
+  throughput
+- `HOLD`: run more ablations or adjust the design before scaling
+- `INSUFFICIENT`: missing baseline/candidate or eval metrics
+
 ## Promotion Criteria
 
 The path hybrid is worth a larger FineWeb-Edu run if it gives:

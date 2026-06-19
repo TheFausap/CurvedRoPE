@@ -1,3 +1,5 @@
 datasets>=3.0.0
 numpy>=2.0.0
 tqdm>=4.66.0
+# Optional for `experiments/analyze_metrics.py --plot`:
+# matplotlib>=3.9.0

@@ -52,6 +52,7 @@ Hermitian, Lorentzian, symplectic, or induced by a curved manifold.
 - `experiments/nonabelian_path_demo.py`: order-sensitive path RoPE demo.
 - `experiments/compare_path_vs_rope.py`: optional NumPy comparison probe.
 - `experiments/train_tinystories.py`: CUDA/MPS/CPU TinyStories training script.
+- `experiments/analyze_metrics.py`: compare TinyStories run metrics and verdicts.
 - `tests/`: regression tests for the algebraic invariants.
 
 ## Quick Start
