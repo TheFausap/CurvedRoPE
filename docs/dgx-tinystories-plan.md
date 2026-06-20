@@ -98,6 +98,75 @@ python experiments/train_tinystories.py \
   --sample_interval 5000
 ```
 
+## Follow-Up After First Result
+
+The first full path-hybrid run was not conclusive:
+
+```text
+rope best_val:        0.4993
+path_hybrid best_val: 0.5006
+path throughput:      0.481x baseline
+path_gate:            0.1328
+```
+
+Interpretation: the path branch is being used, but the full implementation is
+too slow and did not beat RoPE at this scale. The next ladder should test
+whether a cheaper path branch can keep the useful signal while reducing the
+throughput penalty.
+
+Sparse path, last two layers only:
+
+```bash
+python experiments/train_tinystories.py \
+  --device cuda \
+  --positional path_hybrid \
+  --out_dir runs/tinystories_path_last2 \
+  --block_size 256 \
+  --n_layer 6 \
+  --n_head 6 \
+  --n_embd 384 \
+  --path_layer_start 4 \
+  --path_heads 1 \
+  --path_blocks 4 \
+  --path_angle_scale 0.05 \
+  --batch_size 64 \
+  --gradient_accumulation_steps 4 \
+  --dtype bfloat16 \
+  --max_steps 50000 \
+  --eval_interval 1000 \
+  --eval_iters 100 \
+  --sample_interval 5000
+```
+
+Sparse path, alternating upper layers:
+
+```bash
+python experiments/train_tinystories.py \
+  --device cuda \
+  --positional path_hybrid \
+  --out_dir runs/tinystories_path_upper_alt \
+  --block_size 256 \
+  --n_layer 6 \
+  --n_head 6 \
+  --n_embd 384 \
+  --path_layer_start 2 \
+  --path_layer_interval 2 \
+  --path_heads 1 \
+  --path_blocks 4 \
+  --path_angle_scale 0.05 \
+  --batch_size 64 \
+  --gradient_accumulation_steps 4 \
+  --dtype bfloat16 \
+  --max_steps 50000 \
+  --eval_interval 1000 \
+  --eval_iters 100 \
+  --sample_interval 5000
+```
+
+If these variants remain close to RoPE while recovering much of the throughput,
+then the mechanism is still alive. If they are still slower and not better,
+TinyStories is probably not the right scale/task for this path design.
+
 ## What To Watch
 
 - validation loss at matched steps

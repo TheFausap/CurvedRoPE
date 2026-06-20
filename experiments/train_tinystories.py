@@ -7,7 +7,7 @@ import math
 import os
 import random
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Literal
 
@@ -31,6 +31,9 @@ class GPTConfig:
     dropout: float = 0.0
     positional: str = "rope"
     path_heads: int = 2
+    path_blocks: int = 0
+    path_layer_start: int = 0
+    path_layer_interval: int = 1
     path_angle_scale: float = 0.05
 
 
@@ -147,6 +150,7 @@ class CausalSelfAttention(nn.Module):
 
         self.positional = config.positional
         self.path_heads = min(config.path_heads, config.n_head)
+        self.path_blocks = config.path_blocks
         self.path_angle_scale = config.path_angle_scale
 
         self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd, bias=False)
@@ -229,6 +233,8 @@ class CausalSelfAttention(nn.Module):
 
     def _apply_path(self, tensor: torch.Tensor, prefixes: torch.Tensor) -> torch.Tensor:
         path_width = (self.head_dim // 3) * 3
+        if self.path_blocks > 0:
+            path_width = min(path_width, self.path_blocks * 3)
         if path_width == 0 or self.path_heads == 0:
             return tensor
 
@@ -282,10 +288,16 @@ class MLP(nn.Module):
 
 
 class Block(nn.Module):
-    def __init__(self, config: GPTConfig):
+    def __init__(self, config: GPTConfig, layer_index: int):
         super().__init__()
         self.ln_1 = nn.LayerNorm(config.n_embd)
-        self.attn = CausalSelfAttention(config)
+        use_path = (
+            config.positional == "path_hybrid"
+            and layer_index >= config.path_layer_start
+            and (layer_index - config.path_layer_start) % config.path_layer_interval == 0
+        )
+        block_config = config if use_path else replace(config, positional="rope")
+        self.attn = CausalSelfAttention(block_config)
         self.ln_2 = nn.LayerNorm(config.n_embd)
         self.mlp = MLP(config)
 
@@ -301,7 +313,7 @@ class GPT(nn.Module):
         self.config = config
         self.wte = nn.Embedding(config.vocab_size, config.n_embd)
         self.drop = nn.Dropout(config.dropout)
-        self.blocks = nn.ModuleList([Block(config) for _ in range(config.n_layer)])
+        self.blocks = nn.ModuleList([Block(config, index) for index in range(config.n_layer)])
         self.ln_f = nn.LayerNorm(config.n_embd)
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         self.lm_head.weight = self.wte.weight
@@ -439,6 +451,9 @@ def train(args: argparse.Namespace) -> None:
         dropout=args.dropout,
         positional=args.positional,
         path_heads=args.path_heads,
+        path_blocks=args.path_blocks,
+        path_layer_start=args.path_layer_start,
+        path_layer_interval=args.path_layer_interval,
         path_angle_scale=args.path_angle_scale,
     )
 
@@ -581,6 +596,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--n_embd", type=int, default=384)
     parser.add_argument("--dropout", type=float, default=0.0)
     parser.add_argument("--path_heads", type=int, default=2)
+    parser.add_argument("--path_blocks", type=int, default=0, help="3D blocks per path head; 0 means all possible blocks")
+    parser.add_argument("--path_layer_start", type=int, default=0, help="First layer index that uses path_hybrid")
+    parser.add_argument("--path_layer_interval", type=int, default=1, help="Use path every N layers after path_layer_start")
     parser.add_argument("--path_angle_scale", type=float, default=0.05)
 
     parser.add_argument("--batch_size", type=int, default=32)
