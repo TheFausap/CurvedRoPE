@@ -35,6 +35,7 @@ class GPTConfig:
     path_layer_start: int = 0
     path_layer_interval: int = 1
     path_angle_scale: float = 0.05
+    path_translation_scale: float = 0.05
 
 
 def select_device(requested: str) -> torch.device:
@@ -151,7 +152,11 @@ class CausalSelfAttention(nn.Module):
         self.positional = config.positional
         self.path_heads = min(config.path_heads, config.n_head)
         self.path_blocks = config.path_blocks
+        self.path_width = (self.head_dim // 3) * 3
+        if self.path_blocks > 0:
+            self.path_width = min(self.path_width, self.path_blocks * 3)
         self.path_angle_scale = config.path_angle_scale
+        self.path_translation_scale = config.path_translation_scale
 
         self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd, bias=False)
         self.c_proj = nn.Linear(config.n_embd, config.n_embd, bias=False)
@@ -169,9 +174,18 @@ class CausalSelfAttention(nn.Module):
 
         self.path_proj = None
         self.path_gate = None
-        if self.positional == "path_hybrid":
+        self.path_translation_proj = None
+        self.path_translation_gate = None
+        if self.positional in {"path_hybrid", "path_affine"}:
             self.path_proj = nn.Linear(config.n_embd, self.path_heads * 3, bias=False)
             self.path_gate = nn.Parameter(torch.full((self.path_heads,), -6.0))
+        if self.positional == "path_affine":
+            self.path_translation_proj = nn.Linear(
+                config.n_embd,
+                self.path_heads * self.path_width,
+                bias=False,
+            )
+            self.path_translation_gate = nn.Parameter(torch.full((self.path_heads,), -6.0))
 
     def _rope_cache(self, seq_len: int, device: torch.device, dtype: torch.dtype) -> tuple[torch.Tensor, torch.Tensor]:
         positions = torch.arange(seq_len, device=device, dtype=torch.float32)
@@ -181,7 +195,7 @@ class CausalSelfAttention(nn.Module):
         sin = emb.sin().to(dtype).view(1, 1, seq_len, self.head_dim)
         return cos, sin
 
-    def _path_prefixes(self, x: torch.Tensor) -> torch.Tensor:
+    def _path_prefixes(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor | None]:
         if self.path_proj is None:
             raise RuntimeError("path_proj is not initialized")
 
@@ -225,16 +239,44 @@ class CausalSelfAttention(nn.Module):
 
         eye = torch.eye(3, device=x.device, dtype=x.dtype).view(1, 1, 3, 3)
         prefix = eye.expand(batch, self.path_heads, 3, 3).clone()
+        translation_prefix = None
+        if self.path_translation_proj is not None and self.path_width > 0:
+            translations = torch.tanh(self.path_translation_proj(x))
+            translations = translations.view(batch, seq_len, self.path_heads, self.path_width // 3, 3)
+            translations = translations * self.path_translation_scale
+            translation_prefix = torch.zeros(
+                batch,
+                self.path_heads,
+                self.path_width // 3,
+                3,
+                device=x.device,
+                dtype=x.dtype,
+            )
+
         prefixes = []
+        translation_prefixes = []
         for index in range(seq_len):
             prefix = steps[:, index] @ prefix
             prefixes.append(prefix)
-        return torch.stack(prefixes, dim=2)
+            if translation_prefix is not None:
+                translation_prefix = (
+                    torch.einsum("bhij,bhkj->bhki", steps[:, index], translation_prefix)
+                    + translations[:, index]
+                )
+                translation_prefixes.append(translation_prefix)
 
-    def _apply_path(self, tensor: torch.Tensor, prefixes: torch.Tensor) -> torch.Tensor:
-        path_width = (self.head_dim // 3) * 3
-        if self.path_blocks > 0:
-            path_width = min(path_width, self.path_blocks * 3)
+        prefix_tensor = torch.stack(prefixes, dim=2)
+        if translation_prefix is None:
+            return prefix_tensor, None
+        return prefix_tensor, torch.stack(translation_prefixes, dim=2)
+
+    def _apply_path(
+        self,
+        tensor: torch.Tensor,
+        prefixes: torch.Tensor,
+        translations: torch.Tensor | None,
+    ) -> torch.Tensor:
+        path_width = self.path_width
         if path_width == 0 or self.path_heads == 0:
             return tensor
 
@@ -244,7 +286,12 @@ class CausalSelfAttention(nn.Module):
         rotated = torch.einsum("bhtij,bhtkj->bhtki", prefixes, blocks)
         out = tensor.clone()
         gate = torch.sigmoid(self.path_gate).to(tensor.dtype).view(1, self.path_heads, 1, 1)
-        mixed = selected + gate * (rotated.reshape(batch, heads, seq_len, path_width) - selected)
+        rotated = rotated.reshape(batch, heads, seq_len, path_width)
+        mixed = selected + gate * (rotated - selected)
+        if translations is not None and self.path_translation_gate is not None:
+            translation_gate = torch.sigmoid(self.path_translation_gate)
+            translation_gate = translation_gate.to(tensor.dtype).view(1, self.path_heads, 1, 1)
+            mixed = mixed + translation_gate * translations.reshape(batch, heads, seq_len, path_width)
         out[:, : self.path_heads, :, :path_width] = mixed
         return out
 
@@ -259,10 +306,10 @@ class CausalSelfAttention(nn.Module):
         q = apply_rope(q, cos, sin)
         k = apply_rope(k, cos, sin)
 
-        if self.positional == "path_hybrid":
-            prefixes = self._path_prefixes(x)
-            q = self._apply_path(q, prefixes)
-            k = self._apply_path(k, prefixes)
+        if self.positional in {"path_hybrid", "path_affine"}:
+            prefixes, translations = self._path_prefixes(x)
+            q = self._apply_path(q, prefixes, translations)
+            k = self._apply_path(k, prefixes, translations)
 
         y = F.scaled_dot_product_attention(
             q,
@@ -292,7 +339,7 @@ class Block(nn.Module):
         super().__init__()
         self.ln_1 = nn.LayerNorm(config.n_embd)
         use_path = (
-            config.positional == "path_hybrid"
+            config.positional in {"path_hybrid", "path_affine"}
             and layer_index >= config.path_layer_start
             and (layer_index - config.path_layer_start) % config.path_layer_interval == 0
         )
@@ -455,6 +502,7 @@ def train(args: argparse.Namespace) -> None:
         path_layer_start=args.path_layer_start,
         path_layer_interval=args.path_layer_interval,
         path_angle_scale=args.path_angle_scale,
+        path_translation_scale=args.path_translation_scale,
     )
 
     out_dir = Path(args.out_dir)
@@ -524,8 +572,15 @@ def train(args: argparse.Namespace) -> None:
                 for module in model.blocks
                 if module.attn.path_gate is not None
             ]
+            affine_gates = [
+                torch.sigmoid(module.attn.path_translation_gate).detach().mean().item()
+                for module in model.blocks
+                if module.attn.path_translation_gate is not None
+            ]
             if path_gates:
                 msg += f" | path_gate {sum(path_gates) / len(path_gates):.4f}"
+            if affine_gates:
+                msg += f" | affine_gate {sum(affine_gates) / len(affine_gates):.4f}"
             print(msg, flush=True)
             append_metrics(
                 out_dir,
@@ -535,6 +590,7 @@ def train(args: argparse.Namespace) -> None:
                     "loss": total_loss,
                     "tokens_per_second": tokens / elapsed,
                     "path_gate": sum(path_gates) / len(path_gates) if path_gates else None,
+                    "affine_gate": sum(affine_gates) / len(affine_gates) if affine_gates else None,
                     "time": time.time(),
                 },
             )
@@ -589,7 +645,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", default="auto", help="auto, cuda, cuda:0, mps, or cpu")
     parser.add_argument("--dtype", choices=["float32", "bfloat16", "float16"], default="bfloat16")
     parser.add_argument("--seed", type=int, default=1337)
-    parser.add_argument("--positional", choices=["rope", "path_hybrid"], default="rope")
+    parser.add_argument("--positional", choices=["rope", "path_hybrid", "path_affine"], default="rope")
     parser.add_argument("--block_size", type=int, default=256)
     parser.add_argument("--n_layer", type=int, default=6)
     parser.add_argument("--n_head", type=int, default=6)
@@ -600,6 +656,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--path_layer_start", type=int, default=0, help="First layer index that uses path_hybrid")
     parser.add_argument("--path_layer_interval", type=int, default=1, help="Use path every N layers after path_layer_start")
     parser.add_argument("--path_angle_scale", type=float, default=0.05)
+    parser.add_argument("--path_translation_scale", type=float, default=0.05)
 
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--eval_batch_size", type=int, default=32)

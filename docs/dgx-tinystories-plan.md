@@ -167,6 +167,49 @@ If these variants remain close to RoPE while recovering much of the throughput,
 then the mechanism is still alive. If they are still slower and not better,
 TinyStories is probably not the right scale/task for this path design.
 
+## Affine Path Direction
+
+The analogy/functor framing suggests pure rotation may be too restrictive. The
+next branch adds an affine translation prefix:
+
+```text
+b_t = R_t b_(t-1) + tau_t
+x_t' = R_t x_t + b_t
+```
+
+This is exposed as `--positional path_affine`. It should be compared against
+the current lead candidate, `path_last1`, using the same late-layer placement.
+
+Affine last layer:
+
+```bash
+python experiments/train_tinystories.py \
+  --device cuda \
+  --positional path_affine \
+  --out_dir runs/tinystories_path_affine_last1 \
+  --block_size 256 \
+  --n_layer 6 \
+  --n_head 6 \
+  --n_embd 384 \
+  --path_layer_start 5 \
+  --path_heads 1 \
+  --path_blocks 4 \
+  --path_angle_scale 0.05 \
+  --path_translation_scale 0.05 \
+  --batch_size 64 \
+  --gradient_accumulation_steps 4 \
+  --dtype bfloat16 \
+  --max_steps 50000 \
+  --eval_interval 1000 \
+  --eval_iters 100 \
+  --sample_interval 5000
+```
+
+Watch both `path_gate` and `affine_gate`. If `affine_gate` stays near zero, the
+model is rejecting the translation component. If it turns on while validation
+improves or stays at parity, the affine/functor hypothesis deserves a larger
+analogy-style diagnostic.
+
 ## What To Watch
 
 - validation loss at matched steps
@@ -174,6 +217,7 @@ TinyStories is probably not the right scale/task for this path design.
 - sample coherence every 5k steps
 - `metrics.jsonl` in each run directory
 - `path_gate` values in the hybrid run
+- `affine_gate` values in affine path runs
 - whether the hybrid catches up quickly or pays a large throughput penalty
 
 ## Analyze Results

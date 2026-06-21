@@ -19,6 +19,7 @@ class RunSummary:
     train_loss_at_final_eval: float | None
     mean_tokens_per_second: float | None
     final_path_gate: float | None
+    final_affine_gate: float | None
     eval_count: int
     train_count: int
 
@@ -93,6 +94,12 @@ def summarize_run(run_dir: Path) -> RunSummary:
         if isinstance(row.get("path_gate"), int | float)
         and math.isfinite(float(row["path_gate"]))
     ]
+    affine_gates = [
+        float(row["affine_gate"])
+        for row in train_rows
+        if isinstance(row.get("affine_gate"), int | float)
+        and math.isfinite(float(row["affine_gate"]))
+    ]
 
     return RunSummary(
         name=run_dir.name,
@@ -104,6 +111,7 @@ def summarize_run(run_dir: Path) -> RunSummary:
         train_loss_at_final_eval=train_loss_at_final_eval,
         mean_tokens_per_second=mean(token_rates) if token_rates else None,
         final_path_gate=path_gates[-1] if path_gates else None,
+        final_affine_gate=affine_gates[-1] if affine_gates else None,
         eval_count=len(eval_rows),
         train_count=len(train_rows),
     )
@@ -189,6 +197,7 @@ def print_table(summaries: list[RunSummary]) -> None:
         "final_step",
         "tok/s",
         "path_gate",
+        "affine_gate",
         "evals",
     ]
     rows = []
@@ -202,6 +211,7 @@ def print_table(summaries: list[RunSummary]) -> None:
                 format_int(run.final_step),
                 format_float(run.mean_tokens_per_second, digits=0),
                 format_float(run.final_path_gate),
+                format_float(run.final_affine_gate),
                 str(run.eval_count),
             ]
         )
@@ -307,4 +317,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

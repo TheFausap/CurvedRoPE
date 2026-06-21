@@ -145,6 +145,26 @@ ordered composition.
 - The model may need a gate initialized near zero so ordinary RoPE remains the
   initial behavior.
 
+## Affine Variant
+
+Pure rotations may not be enough for analogy-like structure. A late-layer
+relational correction can also use an affine path:
+
+```text
+b_t = R_t b_(t-1) + tau_t
+x_t' = R_t x_t + b_t
+```
+
+This keeps the ordered non-abelian prefix, but adds a transported translation
+term. In the training script this is available as:
+
+```bash
+--positional path_affine
+```
+
+The translation branch has its own near-zero gate, so a run can reveal whether
+the model actually wants the affine component.
+
 ## First Experiment
 
 The current prototype uses toy `SO(3)` role rotations:
@@ -160,4 +180,3 @@ that:
 
 1. path-relative scoring preserves the expected invariant
 2. the same steps in a different order produce a different relative transform
-
