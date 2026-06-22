@@ -242,6 +242,16 @@ If `matplotlib` is installed, write a PNG chart:
 python experiments/analyze_metrics.py runs --plot runs/tinystories_comparison.png
 ```
 
+For paired seed comparisons, suffix run directories with the seed, for example
+`tinystories_rope_1431` and `tinystories_path_last1_1431`, then run:
+
+```bash
+python experiments/analyze_metrics.py runs \
+  --paired \
+  --baseline_group rope \
+  --candidate_group path_last1
+```
+
 The verdict labels are:
 
 - `PROMOTE`: validation loss improves enough, throughput is acceptable, and the

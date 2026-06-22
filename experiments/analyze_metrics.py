@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from statistics import mean
@@ -22,6 +23,16 @@ class RunSummary:
     final_affine_gate: float | None
     eval_count: int
     train_count: int
+
+
+@dataclass
+class PairedSummary:
+    seed: str
+    baseline: RunSummary
+    candidate: RunSummary
+    loss_delta: float
+    relative_improvement: float
+    throughput_ratio: float | None
 
 
 def load_jsonl(path: Path) -> list[dict]:
@@ -139,6 +150,61 @@ def infer_baseline_and_candidate(summaries: list[RunSummary]) -> tuple[RunSummar
     return baseline, candidate
 
 
+def split_seed_suffix(name: str) -> tuple[str, str]:
+    match = re.match(r"^(?P<variant>.+)_(?P<seed>\d+)$", name)
+    if match is None:
+        return name, "default"
+    return match.group("variant"), match.group("seed")
+
+
+def build_paired_summaries(
+    summaries: list[RunSummary],
+    *,
+    baseline_group: str,
+    candidate_group: str,
+) -> list[PairedSummary]:
+    by_seed: dict[str, list[tuple[str, RunSummary]]] = {}
+    for run in summaries:
+        variant, seed = split_seed_suffix(run.name)
+        by_seed.setdefault(seed, []).append((variant, run))
+
+    pairs = []
+    for seed, runs in sorted(by_seed.items()):
+        baseline = next(
+            (
+                run
+                for variant, run in runs
+                if baseline_group in variant and candidate_group not in variant
+            ),
+            None,
+        )
+        candidate = next((run for variant, run in runs if candidate_group in variant), None)
+        if (
+            baseline is None
+            or candidate is None
+            or baseline.best_validation_loss is None
+            or candidate.best_validation_loss is None
+        ):
+            continue
+
+        loss_delta = baseline.best_validation_loss - candidate.best_validation_loss
+        relative_improvement = loss_delta / baseline.best_validation_loss
+        throughput_ratio = None
+        if baseline.mean_tokens_per_second and candidate.mean_tokens_per_second:
+            throughput_ratio = candidate.mean_tokens_per_second / baseline.mean_tokens_per_second
+        pairs.append(
+            PairedSummary(
+                seed=seed,
+                baseline=baseline,
+                candidate=candidate,
+                loss_delta=loss_delta,
+                relative_improvement=relative_improvement,
+                throughput_ratio=throughput_ratio,
+            )
+        )
+    return pairs
+
+
 def verdict(
     baseline: RunSummary | None,
     candidate: RunSummary | None,
@@ -225,6 +291,72 @@ def print_table(summaries: list[RunSummary]) -> None:
         print(" ".join(cell.ljust(width) for cell, width in zip(row, widths, strict=True)))
 
 
+def print_paired_summary(
+    pairs: list[PairedSummary],
+    *,
+    min_loss_improvement: float,
+    max_throughput_penalty: float,
+    min_path_gate: float,
+) -> None:
+    if not pairs:
+        print("\nPaired Seeds: none found")
+        return
+
+    headers = ["seed", "baseline", "candidate", "delta", "rel_%", "speed", "path_gate", "affine_gate"]
+    rows = []
+    for pair in pairs:
+        rows.append(
+            [
+                pair.seed,
+                pair.baseline.name,
+                pair.candidate.name,
+                f"{pair.loss_delta:+.4f}",
+                f"{pair.relative_improvement * 100:+.2f}",
+                f"{pair.throughput_ratio:.3f}" if pair.throughput_ratio is not None else "-",
+                format_float(pair.candidate.final_path_gate),
+                format_float(pair.candidate.final_affine_gate),
+            ]
+        )
+
+    widths = [len(header) for header in headers]
+    for row in rows:
+        widths = [max(width, len(cell)) for width, cell in zip(widths, row, strict=True)]
+
+    print("\nPaired Seeds")
+    print(" ".join(header.ljust(width) for header, width in zip(headers, widths, strict=True)))
+    print(" ".join("-" * width for width in widths))
+    for row in rows:
+        print(" ".join(cell.ljust(width) for cell, width in zip(row, widths, strict=True)))
+
+    mean_delta = mean(pair.loss_delta for pair in pairs)
+    mean_relative = mean(pair.relative_improvement for pair in pairs)
+    speed_values = [pair.throughput_ratio for pair in pairs if pair.throughput_ratio is not None]
+    mean_speed = mean(speed_values) if speed_values else None
+    gate_values = [
+        pair.candidate.final_path_gate
+        for pair in pairs
+        if pair.candidate.final_path_gate is not None
+    ]
+    mean_gate = mean(gate_values) if gate_values else None
+
+    clears_loss = mean_relative >= min_loss_improvement
+    close_loss = mean_relative > -0.002
+    clears_speed = mean_speed is None or mean_speed >= (1.0 - max_throughput_penalty)
+    gate_active = mean_gate is None or mean_gate >= min_path_gate
+    if clears_loss and clears_speed and gate_active:
+        paired_verdict = "PROMOTE"
+    elif close_loss and clears_speed and gate_active:
+        paired_verdict = "PROMISING"
+    else:
+        paired_verdict = "HOLD"
+
+    print()
+    print(f"Paired mean delta:       {mean_delta:+.4f} ({mean_relative * 100:+.2f}%)")
+    print(f"Paired mean speed ratio: {mean_speed:.3f}x" if mean_speed is not None else "Paired mean speed ratio: -")
+    print(f"Paired mean path gate:   {mean_gate:.4f}" if mean_gate is not None else "Paired mean path gate:   -")
+    print(f"Paired verdict:          {paired_verdict}")
+
+
 def maybe_plot(summaries: list[RunSummary], output_path: Path) -> None:
     try:
         import matplotlib.pyplot as plt
@@ -271,6 +403,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("paths", nargs="+", help="Run directories or parent directories containing metrics.jsonl")
     parser.add_argument("--baseline", help="Baseline run directory name or path substring")
     parser.add_argument("--candidate", help="Candidate run directory name or path substring")
+    parser.add_argument("--paired", action="store_true", help="Also aggregate baseline/candidate runs by trailing seed suffix")
+    parser.add_argument("--baseline_group", default="rope", help="Variant substring used as baseline for --paired")
+    parser.add_argument("--candidate_group", default="path", help="Variant substring used as candidate for --paired")
     parser.add_argument("--plot", type=Path, help="Optional PNG output path")
     parser.add_argument("--min_loss_improvement", type=float, default=0.005)
     parser.add_argument("--max_throughput_penalty", type=float, default=0.25)
@@ -310,6 +445,19 @@ def main() -> None:
     print(f"Verdict:   {decision}")
     for reason in reasons:
         print(f"- {reason}")
+
+    if args.paired:
+        pairs = build_paired_summaries(
+            summaries,
+            baseline_group=args.baseline_group,
+            candidate_group=args.candidate_group,
+        )
+        print_paired_summary(
+            pairs,
+            min_loss_improvement=args.min_loss_improvement,
+            max_throughput_penalty=args.max_throughput_penalty,
+            min_path_gate=args.min_path_gate,
+        )
 
     if args.plot:
         maybe_plot(summaries, args.plot)
