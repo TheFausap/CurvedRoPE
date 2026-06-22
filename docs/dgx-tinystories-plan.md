@@ -269,3 +269,141 @@ The path hybrid is worth a larger FineWeb-Edu run if it gives:
 - similar validation loss with better story continuity, and
 - no severe throughput regression, and
 - path gates move above their near-zero initialization.
+
+# FineWeb-Edu 1B Pilot
+
+## Goal
+
+Promote the replicated TinyStories `path_last1` candidate to a small
+FineWeb-Edu pilot. Keep the byte-level tokenizer, model size, context length,
+optimizer, and schedule unchanged so this tests the architecture rather than a
+new training stack.
+
+Use:
+
+```text
+dataset: HuggingFaceFW/fineweb-edu
+config:  sample-10BT
+split:   train
+column:  text
+```
+
+The source dataset is train-only for this pilot, so validation is carved
+deterministically from the beginning of the train stream, then training is
+written from the remaining stream without overlap.
+
+## FineWeb-Edu Data Prep
+
+Full 1B-token pilot:
+
+```bash
+python experiments/train_tinystories.py \
+  --prepare_data \
+  --data_dir data/fineweb_edu_1b_byte \
+  --dataset_name HuggingFaceFW/fineweb-edu \
+  --dataset_config sample-10BT \
+  --train_split train \
+  --validation_split none \
+  --text_column text \
+  --max_validation_tokens 10000000 \
+  --max_train_tokens 1000000000 \
+  --device cuda \
+  --max_steps 1 \
+  --eval_iters 1
+```
+
+DGX smoke slice:
+
+```bash
+python experiments/train_tinystories.py \
+  --prepare_data \
+  --data_dir data/fineweb_edu_smoke_byte \
+  --dataset_name HuggingFaceFW/fineweb-edu \
+  --dataset_config sample-10BT \
+  --train_split train \
+  --validation_split none \
+  --text_column text \
+  --max_validation_tokens 1000000 \
+  --max_train_tokens 20000000 \
+  --device cuda \
+  --max_steps 1 \
+  --eval_iters 1
+```
+
+The generated `metadata.json` records dataset/config/splits, text column,
+token counts, token caps, and whether validation was carved from the train
+stream.
+
+## FineWeb-Edu Matched Runs
+
+RoPE baseline:
+
+```bash
+python experiments/train_tinystories.py \
+  --data_dir data/fineweb_edu_1b_byte \
+  --out_dir runs/fineweb_edu_1b_rope_1337 \
+  --device cuda \
+  --seed 1337 \
+  --positional rope \
+  --block_size 256 \
+  --n_layer 6 \
+  --n_head 6 \
+  --n_embd 384 \
+  --batch_size 64 \
+  --gradient_accumulation_steps 4 \
+  --dtype bfloat16 \
+  --max_steps 50000 \
+  --eval_interval 1000 \
+  --eval_iters 100 \
+  --sample_interval 5000
+```
+
+Path candidate:
+
+```bash
+python experiments/train_tinystories.py \
+  --data_dir data/fineweb_edu_1b_byte \
+  --out_dir runs/fineweb_edu_1b_path_last1_1337 \
+  --device cuda \
+  --seed 1337 \
+  --positional path_hybrid \
+  --path_layer_start 5 \
+  --path_heads 1 \
+  --path_blocks 4 \
+  --path_angle_scale 0.05 \
+  --block_size 256 \
+  --n_layer 6 \
+  --n_head 6 \
+  --n_embd 384 \
+  --batch_size 64 \
+  --gradient_accumulation_steps 4 \
+  --dtype bfloat16 \
+  --max_steps 50000 \
+  --eval_interval 1000 \
+  --eval_iters 100 \
+  --sample_interval 5000
+```
+
+For the first DGX smoke, run both models with the smoke data dir for `1000`
+steps before launching the full 1B-token pilot.
+
+## FineWeb-Edu Evaluation
+
+Analyze paired runs:
+
+```bash
+python experiments/analyze_metrics.py runs \
+  --paired \
+  --baseline_group rope \
+  --candidate_group path_last1
+```
+
+Promotion criteria:
+
+- `path_last1` best validation loss is non-negative versus paired RoPE, or
+  within `-0.05%` with noticeably better samples.
+- Throughput ratio is at least `0.85x`.
+- `path_gate` remains active above `0.01`.
+
+If seed `1337` is positive or near parity, run paired seeds `1431` and `2327`
+before changing architecture.

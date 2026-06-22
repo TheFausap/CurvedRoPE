@@ -60,12 +60,29 @@ def encode_text(text: str) -> np.ndarray:
     return np.frombuffer(text.encode("utf-8", errors="ignore"), dtype=np.uint8).astype(np.uint16)
 
 
-def prepare_tinystories(
+def write_tokens(handle, tokens: np.ndarray, max_tokens: int | None, token_count: int) -> tuple[int, bool]:
+    remaining = None if max_tokens is None else max_tokens - token_count
+    if remaining is not None and remaining <= 0:
+        return token_count, True
+    if remaining is not None and len(tokens) > remaining:
+        tokens = tokens[:remaining]
+    tokens.tofile(handle)
+    token_count += len(tokens)
+    return token_count, max_tokens is not None and token_count >= max_tokens
+
+
+def prepare_dataset(
     data_dir: Path,
     *,
-    dataset_name: str = "roneneldan/TinyStories",
+    dataset_name: str,
+    dataset_config: str | None,
+    train_split: str,
+    validation_split: str,
+    text_column: str,
     max_train_stories: int | None = None,
     max_validation_stories: int | None = None,
+    max_train_tokens: int | None = None,
+    max_validation_tokens: int | None = None,
 ) -> None:
     try:
         from datasets import load_dataset
@@ -78,34 +95,121 @@ def prepare_tinystories(
 
     data_dir.mkdir(parents=True, exist_ok=True)
 
-    def write_split(split: str, max_stories: int | None) -> int:
+    def load_stream(split: str):
+        if dataset_config:
+            return load_dataset(dataset_name, dataset_config, split=split, streaming=True)
+        return load_dataset(dataset_name, split=split, streaming=True)
+
+    def row_tokens(row: dict) -> np.ndarray:
+        if text_column not in row:
+            available = ", ".join(sorted(row.keys()))
+            raise KeyError(f"Column {text_column!r} not found. Available columns: {available}")
+        tokens = encode_text(str(row[text_column]))
+        return np.concatenate([tokens, np.array([EOS_TOKEN], dtype=np.uint16)])
+
+    def write_split(split: str, output_name: str, max_stories: int | None, max_tokens: int | None) -> int:
         output_path = data_dir / f"{split}.bin"
+        if output_name != split:
+            output_path = data_dir / f"{output_name}.bin"
         if output_path.exists():
             print(f"{output_path} already exists; skipping")
             return int(output_path.stat().st_size // np.dtype(np.uint16).itemsize)
 
-        dataset = load_dataset(dataset_name, split=split, streaming=True)
+        dataset = load_stream(split)
         token_count = 0
         with output_path.open("wb") as handle:
-            iterator = tqdm(dataset, desc=f"writing {split}", unit="story")
+            iterator = tqdm(dataset, desc=f"writing {output_name}", unit="row")
             for index, row in enumerate(iterator):
                 if max_stories is not None and index >= max_stories:
                     break
-                tokens = encode_text(row["text"])
-                tokens.tofile(handle)
-                np.array([EOS_TOKEN], dtype=np.uint16).tofile(handle)
-                token_count += len(tokens) + 1
+                token_count, done = write_tokens(handle, row_tokens(row), max_tokens, token_count)
                 iterator.set_postfix(tokens=token_count)
+                if done:
+                    break
         return token_count
 
-    train_tokens = write_split("train", max_train_stories)
-    validation_tokens = write_split("validation", max_validation_stories)
+    validation_carved_from_train = validation_split.lower() == "none"
+
+    if validation_carved_from_train:
+        train_path = data_dir / "train.bin"
+        validation_path = data_dir / "validation.bin"
+        if max_validation_stories is None and max_validation_tokens is None:
+            raise ValueError(
+                "When --validation_split none, set --max_validation_tokens or "
+                "--max_validation_stories so validation carving is finite."
+            )
+        if train_path.exists() and validation_path.exists():
+            train_tokens = int(train_path.stat().st_size // np.dtype(np.uint16).itemsize)
+            validation_tokens = int(validation_path.stat().st_size // np.dtype(np.uint16).itemsize)
+            print(f"{train_path} and {validation_path} already exist; skipping")
+        elif train_path.exists() or validation_path.exists():
+            raise FileExistsError(
+                f"Found only one of {train_path} and {validation_path}. "
+                "Remove the partial files or choose a fresh data_dir."
+            )
+        else:
+            dataset = load_stream(train_split)
+            train_tokens = 0
+            validation_tokens = 0
+            validation_stories = 0
+            train_stories = 0
+            with validation_path.open("wb") as validation_handle, train_path.open("wb") as train_handle:
+                iterator = tqdm(dataset, desc="writing validation/train", unit="row")
+                for row in iterator:
+                    tokens = row_tokens(row)
+                    validation_story_ok = (
+                        max_validation_stories is None
+                        or validation_stories < max_validation_stories
+                    )
+                    validation_token_ok = (
+                        max_validation_tokens is None
+                        or validation_tokens < max_validation_tokens
+                    )
+                    if validation_story_ok and validation_token_ok:
+                        validation_tokens, validation_done = write_tokens(
+                            validation_handle,
+                            tokens,
+                            max_validation_tokens,
+                            validation_tokens,
+                        )
+                        validation_stories += 1
+                    else:
+                        if max_train_stories is not None and train_stories >= max_train_stories:
+                            break
+                        train_tokens, train_done = write_tokens(
+                            train_handle,
+                            tokens,
+                            max_train_tokens,
+                            train_tokens,
+                        )
+                        train_stories += 1
+                        if train_done:
+                            break
+                    iterator.set_postfix(train_tokens=train_tokens, validation_tokens=validation_tokens)
+    else:
+        train_tokens = write_split(train_split, "train", max_train_stories, max_train_tokens)
+        validation_tokens = write_split(
+            validation_split,
+            "validation",
+            max_validation_stories,
+            max_validation_tokens,
+        )
+
     metadata = {
         "dataset": dataset_name,
+        "dataset_config": dataset_config,
+        "train_split": train_split,
+        "validation_split": validation_split,
+        "text_column": text_column,
         "vocab_size": VOCAB_SIZE,
         "dtype": "uint16",
         "train_tokens": train_tokens,
         "validation_tokens": validation_tokens,
+        "validation_carved_from_train": validation_carved_from_train,
+        "max_train_tokens": max_train_tokens,
+        "max_validation_tokens": max_validation_tokens,
+        "max_train_stories": max_train_stories,
+        "max_validation_stories": max_validation_stories,
     }
     (data_dir / "metadata.json").write_text(json.dumps(metadata, indent=2) + "\n")
 
@@ -479,10 +583,20 @@ def train(args: argparse.Namespace) -> None:
 
     data_dir = Path(args.data_dir)
     if args.prepare_data:
-        prepare_tinystories(
+        dataset_config = args.dataset_config
+        if dataset_config is not None and dataset_config.lower() == "none":
+            dataset_config = None
+        prepare_dataset(
             data_dir,
+            dataset_name=args.dataset_name,
+            dataset_config=dataset_config,
+            train_split=args.train_split,
+            validation_split=args.validation_split,
+            text_column=args.text_column,
             max_train_stories=args.max_train_stories,
             max_validation_stories=args.max_validation_stories,
+            max_train_tokens=args.max_train_tokens,
+            max_validation_tokens=args.max_validation_tokens,
         )
 
     train_path = data_dir / "train.bin"
@@ -638,8 +752,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--data_dir", default="data/tinystories_byte")
     parser.add_argument("--out_dir", default="runs/tinystories_rope")
     parser.add_argument("--prepare_data", action="store_true")
+    parser.add_argument("--dataset_name", default="roneneldan/TinyStories")
+    parser.add_argument("--dataset_config", default=None)
+    parser.add_argument("--train_split", default="train")
+    parser.add_argument("--validation_split", default="validation")
+    parser.add_argument("--text_column", default="text")
     parser.add_argument("--max_train_stories", type=int, default=None)
     parser.add_argument("--max_validation_stories", type=int, default=None)
+    parser.add_argument("--max_train_tokens", type=int, default=None)
+    parser.add_argument("--max_validation_tokens", type=int, default=None)
     parser.add_argument("--resume", action="store_true")
 
     parser.add_argument("--device", default="auto", help="auto, cuda, cuda:0, mps, or cpu")
