@@ -169,16 +169,23 @@ def build_paired_summaries(
         by_seed.setdefault(seed, []).append((variant, run))
 
     pairs = []
+    def matches(pattern: str, variant: str, run: RunSummary) -> bool:
+        return pattern in variant or pattern in run.name
+
     for seed, runs in sorted(by_seed.items()):
         baseline = next(
             (
                 run
                 for variant, run in runs
-                if baseline_group in variant and candidate_group not in variant
+                if matches(baseline_group, variant, run)
+                and not matches(candidate_group, variant, run)
             ),
             None,
         )
-        candidate = next((run for variant, run in runs if candidate_group in variant), None)
+        candidate = next(
+            (run for variant, run in runs if matches(candidate_group, variant, run)),
+            None,
+        )
         if (
             baseline is None
             or candidate is None
